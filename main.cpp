@@ -26,10 +26,115 @@ struct Vec3 {
         return Vec3(x + other.x, y + other.y, z + other.z);
     }
     
+    Vec3 operator-(const Vec3& other) const {
+        return Vec3(x - other.x, y - other.y, z - other.z);
+    }
+    
     Vec3 operator*(float scalar) const {
         return Vec3(x * scalar, y * scalar, z * scalar);
     }
 };
+
+// Simple 4x4 Matrix for transformations
+struct Mat4 {
+    float m[4][4];
+    
+    Mat4() {
+        // Initialize as identity matrix
+        for(int i = 0; i < 4; i++) {
+            for(int j = 0; j < 4; j++) {
+                m[i][j] = (i == j) ? 1.0f : 0.0f;
+            }
+        }
+    }
+    
+    // Multiply matrix by vector
+    Vec3 multiply(const Vec3& v) const {
+        float w = m[3][0] * v.x + m[3][1] * v.y + m[3][2] * v.z + m[3][3];
+        if(w == 0) w = 1.0f;
+        
+        return Vec3(
+            (m[0][0] * v.x + m[0][1] * v.y + m[0][2] * v.z + m[0][3]) / w,
+            (m[1][0] * v.x + m[1][1] * v.y + m[1][2] * v.z + m[1][3]) / w,
+            (m[2][0] * v.x + m[2][1] * v.y + m[2][2] * v.z + m[2][3]) / w
+        );
+    }
+    
+    // Multiply two matrices
+    Mat4 operator*(const Mat4& other) const {
+        Mat4 result;
+        for(int i = 0; i < 4; i++) {
+            for(int j = 0; j < 4; j++) {
+                result.m[i][j] = 0;
+                for(int k = 0; k < 4; k++) {
+                    result.m[i][j] += m[i][k] * other.m[k][j];
+                }
+            }
+        }
+        return result;
+    }
+};
+
+// Create rotation matrix around Y axis
+Mat4 rotationY(float angle) {
+    Mat4 mat;
+    float c = cos(angle);
+    float s = sin(angle);
+    
+    mat.m[0][0] = c;
+    mat.m[0][2] = s;
+    mat.m[2][0] = -s;
+    mat.m[2][2] = c;
+    
+    return mat;
+}
+
+// Create rotation matrix around X axis
+Mat4 rotationX(float angle) {
+    Mat4 mat;
+    float c = cos(angle);
+    float s = sin(angle);
+    
+    mat.m[1][1] = c;
+    mat.m[1][2] = -s;
+    mat.m[2][1] = s;
+    mat.m[2][2] = c;
+    
+    return mat;
+}
+
+// Create translation matrix
+Mat4 translation(float x, float y, float z) {
+    Mat4 mat;
+    mat.m[0][3] = x;
+    mat.m[1][3] = y;
+    mat.m[2][3] = z;
+    return mat;
+}
+
+// Create scale matrix
+Mat4 scale(float sx, float sy, float sz) {
+    Mat4 mat;
+    mat.m[0][0] = sx;
+    mat.m[1][1] = sy;
+    mat.m[2][2] = sz;
+    return mat;
+}
+
+// Create perspective projection matrix
+Mat4 perspective(float fov, float aspect, float near, float far) {
+    Mat4 mat;
+    float tanHalfFov = tan(fov / 2.0f);
+    
+    mat.m[0][0] = 1.0f / (aspect * tanHalfFov);
+    mat.m[1][1] = 1.0f / tanHalfFov;
+    mat.m[2][2] = -(far + near) / (far - near);
+    mat.m[2][3] = -(2.0f * far * near) / (far - near);
+    mat.m[3][2] = -1.0f;
+    mat.m[3][3] = 0.0f;
+    
+    return mat;
+}
 
 // Color structure
 struct Color {
@@ -55,6 +160,12 @@ SDL_Window* window = nullptr;
 SDL_Renderer* renderer = nullptr;
 Color currentColor;
 std::vector<Color> framebuffer;
+
+// Camera parameters
+float cameraAngleY = 0.0f;
+float cameraAngleX = 0.0f;
+float cameraDistance = 5.0f;
+bool autoRotate = false;
 
 // Initialize framebuffer
 void initFramebuffer() {
@@ -164,20 +275,6 @@ bool loadOBJ(const std::string& path, std::vector<Vec3>& out_vertices, std::vect
     return true;
 }
 
-// Setup vertex array from faces
-std::vector<Vec3> setupVertexArray(const std::vector<Vec3>& vertices, const std::vector<Face>& faces) {
-    std::vector<Vec3> vertexArray;
-    
-    for (const auto& face : faces) {
-        for (const auto& vertexIndices : face.vertexIndices) {
-            Vec3 vertexPosition = vertices[vertexIndices[0]];
-            vertexArray.push_back(vertexPosition);
-        }
-    }
-    
-    return vertexArray;
-}
-
 // Render buffer to screen
 void renderBuffer(SDL_Renderer* renderer) {
     SDL_Texture* texture = SDL_CreateTexture(renderer, 
@@ -208,7 +305,7 @@ void init() {
         return;
     }
     
-    window = SDL_CreateWindow("Software Renderer - OBJ Viewer", 
+    window = SDL_CreateWindow("3D OBJ Viewer - Press Arrow Keys to Rotate", 
         SDL_WINDOWPOS_CENTERED, 
         SDL_WINDOWPOS_CENTERED, 
         SCREEN_WIDTH, 
@@ -233,55 +330,86 @@ void init() {
 // Set current color
 void setColor(const Color& color) {
     currentColor = color;
-    std::cout << "Color set to: R=" << (int)color.r 
-              << " G=" << (int)color.g 
-              << " B=" << (int)color.b << std::endl;
 }
 
-// Main render function
-void render() {
-    // Load the OBJ model
-    std::vector<Vec3> vertices;
-    std::vector<Face> faces;
+// Main render function with 3D transformations
+void render(const std::vector<Vec3>& vertices, const std::vector<Face>& faces) {
+    // Clear the screen
+    clear();
     
-    // Change this path to your OBJ file
-    if (!loadOBJ("model.obj", vertices, faces)) {
-        std::cerr << "Failed to load OBJ file" << std::endl;
-        return;
-    }
+    // Create transformation matrices
+    Mat4 modelMatrix = scale(1.0f, 1.0f, 1.0f);  // Scale the model if needed
     
-    // Scale and translate the model to fit on screen
-    float scale = 100.0f;  // Adjust based on your model size
-    Vec3 offset(SCREEN_WIDTH / 2.0f, SCREEN_HEIGHT / 2.0f, 0.0f);
+    // Rotate the model for better viewing angle
+    Mat4 rotY = rotationY(cameraAngleY);
+    Mat4 rotX = rotationX(cameraAngleX);
+    Mat4 rotation = rotY * rotX;
     
-    // Transform vertices
-    for (auto& vertex : vertices) {
-        vertex = vertex * scale + offset;
+    // Move the model back from the camera
+    Mat4 translationMat = translation(0.0f, 0.0f, -cameraDistance);
+    
+    // Create perspective projection
+    float fov = 3.14159f / 4.0f;  // 45 degrees
+    float aspect = (float)SCREEN_WIDTH / (float)SCREEN_HEIGHT;
+    Mat4 projection = perspective(fov, aspect, 0.1f, 100.0f);
+    
+    // Combine all transformations
+    Mat4 mvp = projection * translationMat * rotation * modelMatrix;
+    
+    // Transform all vertices
+    std::vector<Vec3> transformedVertices;
+    for (const auto& vertex : vertices) {
+        Vec3 transformed = mvp.multiply(vertex);
+        
+        // Convert from normalized device coordinates to screen coordinates
+        transformed.x = (transformed.x + 1.0f) * 0.5f * SCREEN_WIDTH;
+        transformed.y = (1.0f - transformed.y) * 0.5f * SCREEN_HEIGHT;  // Flip Y axis
+        
+        transformedVertices.push_back(transformed);
     }
     
     // Draw all triangles
     int triangleCount = 0;
     for (const auto& face : faces) {
-        // Most OBJ faces are quads or triangles
-        // We'll triangulate quads if necessary
         if (face.vertexIndices.size() >= 3) {
+            // Check if vertices are valid
+            bool validFace = true;
+            for (const auto& idx : face.vertexIndices) {
+                if (idx[0] >= transformedVertices.size()) {
+                    validFace = false;
+                    break;
+                }
+            }
+            
+            if (!validFace) continue;
+            
             // Draw first triangle
-            Vec3 v1 = vertices[face.vertexIndices[0][0]];
-            Vec3 v2 = vertices[face.vertexIndices[1][0]];
-            Vec3 v3 = vertices[face.vertexIndices[2][0]];
-            triangle(v1, v2, v3);
-            triangleCount++;
+            Vec3 v1 = transformedVertices[face.vertexIndices[0][0]];
+            Vec3 v2 = transformedVertices[face.vertexIndices[1][0]];
+            Vec3 v3 = transformedVertices[face.vertexIndices[2][0]];
+            
+            // Simple back-face culling (optional)
+            // Calculate normal using cross product
+            Vec3 edge1 = v2 - v1;
+            Vec3 edge2 = v3 - v1;
+            float normalZ = edge1.x * edge2.y - edge1.y * edge2.x;
+            
+            // Only draw if facing camera (you can comment this out if you want to see all faces)
+            // if (normalZ > 0) {
+                triangle(v1, v2, v3);
+                triangleCount++;
+            // }
             
             // If it's a quad, draw the second triangle
             if (face.vertexIndices.size() == 4) {
-                Vec3 v4 = vertices[face.vertexIndices[3][0]];
-                triangle(v1, v3, v4);
-                triangleCount++;
+                Vec3 v4 = transformedVertices[face.vertexIndices[3][0]];
+                // if (normalZ > 0) {
+                    triangle(v1, v3, v4);
+                    triangleCount++;
+                // }
             }
         }
     }
-    
-    std::cout << "Drew " << triangleCount << " triangles" << std::endl;
 }
 
 // IMPORTANT: SDL requires the main function to have these exact parameters
@@ -294,69 +422,134 @@ int main(int argc, char* argv[]) {
     }
     
     // Print instructions
-    std::cout << "\n=== OBJ Renderer Controls ===" << std::endl;
-    std::cout << "Press R for Red" << std::endl;
-    std::cout << "Press G for Green" << std::endl;
-    std::cout << "Press B for Blue" << std::endl;
-    std::cout << "Press Y for Yellow" << std::endl;
-    std::cout << "Press W for White" << std::endl;
-    std::cout << "Press C for Cyan" << std::endl;
-    std::cout << "Press M for Magenta" << std::endl;
-    std::cout << "Press ESC or close window to quit" << std::endl;
-    std::cout << "============================\n" << std::endl;
+    std::cout << "\n=== 3D OBJ Viewer Controls ===" << std::endl;
+    std::cout << "Arrow Keys: Rotate model" << std::endl;
+    std::cout << "W/S: Zoom in/out" << std::endl;
+    std::cout << "A: Toggle auto-rotation" << std::endl;
+    std::cout << "R: Reset view" << std::endl;
+    std::cout << "1-7: Change colors" << std::endl;
+    std::cout << "ESC: Quit" << std::endl;
+    std::cout << "================================\n" << std::endl;
+    
+    // Load the OBJ model once
+    std::vector<Vec3> vertices;
+    std::vector<Face> faces;
+    
+    if (!loadOBJ("model.obj", vertices, faces)) {
+        std::cerr << "Failed to load OBJ file" << std::endl;
+        return -1;
+    }
+    
+    // Set initial viewing angle (diagonal view)
+    cameraAngleY = 0.785f;  // 45 degrees in radians
+    cameraAngleX = 0.35f;   // 20 degrees in radians
+    cameraDistance = 3.0f;  // Distance from object
     
     // Initial render with yellow color
-    clear();
-    setColor(Color(255, 255, 0));  // Yellow = Red + Green
-    render();
+    setColor(Color(255, 255, 0));  // Yellow
+    render(vertices, faces);
     renderBuffer(renderer);
     
     bool running = true;
     SDL_Event event;
+    Uint32 lastTime = SDL_GetTicks();
     
     while (running) {
+        Uint32 currentTime = SDL_GetTicks();
+        float deltaTime = (currentTime - lastTime) / 1000.0f;
+        lastTime = currentTime;
+        
+        // Auto-rotation if enabled
+        if (autoRotate) {
+            cameraAngleY += deltaTime * 1.0f;  // Rotate 1 radian per second
+            render(vertices, faces);
+            renderBuffer(renderer);
+        }
+        
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT) {
                 running = false;
             }
             
-            // Re-render on any key press
             if (event.type == SDL_KEYDOWN) {
-                clear();
+                bool needsRender = true;
                 
-                // Change color based on key pressed
                 switch(event.key.keysym.sym) {
+                    // Rotation controls
+                    case SDLK_LEFT:
+                        cameraAngleY -= 0.1f;
+                        break;
+                    case SDLK_RIGHT:
+                        cameraAngleY += 0.1f;
+                        break;
+                    case SDLK_UP:
+                        cameraAngleX -= 0.1f;
+                        break;
+                    case SDLK_DOWN:
+                        cameraAngleX += 0.1f;
+                        break;
+                        
+                    // Zoom controls
+                    case SDLK_w:
+                        cameraDistance -= 0.2f;
+                        if (cameraDistance < 1.0f) cameraDistance = 1.0f;
+                        break;
+                    case SDLK_s:
+                        cameraDistance += 0.2f;
+                        if (cameraDistance > 10.0f) cameraDistance = 10.0f;
+                        break;
+                        
+                    // Auto-rotation toggle
+                    case SDLK_a:
+                        autoRotate = !autoRotate;
+                        std::cout << "Auto-rotation: " << (autoRotate ? "ON" : "OFF") << std::endl;
+                        break;
+                        
+                    // Reset view
                     case SDLK_r:
+                        cameraAngleY = 0.785f;
+                        cameraAngleX = 0.35f;
+                        cameraDistance = 3.0f;
+                        autoRotate = false;
+                        break;
+                        
+                    // Color controls
+                    case SDLK_1:
                         setColor(Color(255, 0, 0));  // Red
                         break;
-                    case SDLK_g:
+                    case SDLK_2:
                         setColor(Color(0, 255, 0));  // Green
                         break;
-                    case SDLK_b:
+                    case SDLK_3:
                         setColor(Color(0, 0, 255));  // Blue
                         break;
-                    case SDLK_y:
+                    case SDLK_4:
                         setColor(Color(255, 255, 0));  // Yellow
                         break;
-                    case SDLK_w:
+                    case SDLK_5:
                         setColor(Color(255, 255, 255));  // White
                         break;
-                    case SDLK_c:
+                    case SDLK_6:
                         setColor(Color(0, 255, 255));  // Cyan
                         break;
-                    case SDLK_m:
+                    case SDLK_7:
                         setColor(Color(255, 0, 255));  // Magenta
                         break;
+                        
                     case SDLK_ESCAPE:
                         running = false;
+                        needsRender = false;
                         break;
+                        
                     default:
-                        // Keep current color
+                        needsRender = false;
                         break;
                 }
                 
-                render();
-                renderBuffer(renderer);
+                if (needsRender) {
+                    render(vertices, faces);
+                    renderBuffer(renderer);
+                }
             }
         }
         
